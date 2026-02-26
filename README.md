@@ -4,10 +4,11 @@
 
 This project demonstrates a three-tier architecture that connects:
 
-1. **Google Gemini AI** - Language model that understands user queries
-2. **MCP Server** - Protocol server that provides tools/functions
-3. **Data Source API** - REST API with vehicle information
+1. **Google Gemini AI** - Language model that understands user queries and decides which tool to call
+2. **MCP Server** - Protocol server that provides a growing toolkit (lookup, search, summary, and update)
+3. **Data Source API** - REST API with vehicle information, now with search and update endpoints
 
+The agent can now not only _read_ from the data source by ID but also **search vehicles by criteria**, **get inventory summaries**, and even **change a vehicle's status**, turning it into a more autonomous toolset.
 The system works by having Gemini AI decide which tools to use, the MCP server bridges communication, and the data source provides the actual data.
 
 ---
@@ -20,8 +21,8 @@ The system works by having Gemini AI decide which tools to use, the MCP server b
 │ (mcp_client.py) │
 └────────┬────────┘
          │
-         ├──────────────────────────────┐
-         │                              │
+         ├─────────────────────────────┐
+         │                             │
     ┌────▼──────────────────────────┐  │
     │ Google Gemini AI              │  │
     │ (2.5-flash-lite model)        │  │
@@ -30,12 +31,12 @@ The system works by having Gemini AI decide which tools to use, the MCP server b
     │ - Decides which tools to use  │  │
     │ - Generates final response    │  │
     └────┬──────────────────────────┘  │
-         │                              │
+         │                             │
          │ 1. Sends tools definitions  │
          │ 2. Gets back tool request   │
          │ 3. Sends tool result        │
          │ 4. Gets final answer        │
-         │                              │
+         │                             │
     ┌────▼──────────────────────────┐  │
     │ MCP Server (mcp_server.py)    │  │
     │                               │  │
@@ -43,19 +44,21 @@ The system works by having Gemini AI decide which tools to use, the MCP server b
     │ - Exposes get_vehicle_details │  │
     │ - Communicates via stdio      │  │
     └────┬──────────────────────────┘  │
-         │                              │
+         │                             │
          │ HTTP GET Request            │
-         │                              │
+         │                             │
     ┌────▼──────────────────────────┐  │
     │ Data Source API (data_source) │  │
     │ (FastAPI on port 8001)        │  │
     │                               │  │
     │ - /vehicles/{vehicle_id}      │  │
+    │ - /vehicles/search            │  │
+    │ - PATCH /vehicles/{vehicle_id}│  │
     │ - Returns: make, model,       │  │
     │   status, destination         │  │
     └───────────────────────────────┘  │
-         │                              │
-         └──────────────────────────────┘
+         │                             │
+         └─────────────────────────────┘
 ```
 
 ---
@@ -71,7 +74,10 @@ The system works by having Gemini AI decide which tools to use, the MCP server b
 #### What it does:
 
 - Provides a mock database of vehicles (101, 102, etc.)
-- Exposes endpoint: `GET /vehicles/{vehicle_id}`
+- Exposes endpoints:
+  - `GET /vehicles/{vehicle_id}` for direct lookup
+  - `GET /vehicles/search` for criteria-based semantic search
+  - `PATCH /vehicles/{vehicle_id}` to change status
 - Returns JSON with: `make`, `model`, `status`, `destination`
 
 #### Code Flow:
@@ -94,6 +100,10 @@ async def get_vehicle(vehicle_id: str):
 ```bash
 python data_source.py
 # Server runs on http://127.0.0.1:8001
+# Endpoints available:
+#   GET /vehicles/{id}
+#   GET /vehicles/search?status=Shipped&make=Toyota
+#   PATCH /vehicles/{id}?status=In+Port
 ```
 
 ---
@@ -107,9 +117,10 @@ python data_source.py
 #### What it does:
 
 - Starts as a subprocess when mcp_client.py runs
-- Provides a tool called `get_vehicle_details`
+- **Provides multiple tools**: `get_vehicle_details`, `search_vehicles`,
+  `inventory_summary`, and `change_status`
 - Fetches data from the data source API (localhost:8001)
-- Converts HTTP responses into tool outputs
+- Converts HTTP responses into tool outputs with rich error messaging
 
 #### Code Flow:
 
@@ -133,9 +144,13 @@ if __name__ == "__main__":
 
 #### Key Features:
 
-- **Error Handling**: Catches timeouts and connection errors
+- **Error Handling**: Tools return descriptive messages and suggestions when things fail
 - **Timeout**: 5-second limit to prevent hanging
 - **Schema**: Automatically generates input schema from function parameters
+- **Agentic tools**:
+  - `search_vehicles` acts as the agent's eyes when ID is unknown
+  - `inventory_summary` supplies macro-level counts by status/destination
+  - `change_status` allows the agent to perform write operations
 
 #### To Run Manually (for testing):
 
@@ -146,7 +161,7 @@ python mcp_server.py
 
 ---
 
-### 3. **mcp_client.py** - The Orchestrator
+### 3. **mcp_client.py** - The Orchestrator & Chain Manager
 
 **Purpose**: Main application that coordinates between Gemini AI and MCP tools  
 **Framework**: MCP Client SDK + Google Genai SDK
@@ -155,11 +170,12 @@ python mcp_server.py
 
 1. Starts the MCP server as a subprocess
 2. Connects to Gemini AI API
-3. Gets available tools from MCP server
+3. Gets available tools from MCP server (including new search/summary/update functions)
 4. Sends tools to Gemini with a user query
-5. Handles Gemini's tool requests
-6. Executes tools via MCP server
-7. Sends results back to Gemini for final answer
+5. Handles Gemini's tool requests in a **loop**, chaining multiple calls
+6. Executes tools via MCP server and logs raw output for debugging
+7. Sends results back to Gemini until a plain-text answer is produced
+8. Handles API errors (e.g. quota limits) gracefully
 
 #### Code Flow:
 
@@ -201,10 +217,10 @@ gemini_tools = [
 # clean_schema() removes "additionalProperties" that Gemini doesn't support
 ```
 
-**Step 4: Send to Gemini with User Query**
+Step 4: Send to Gemini with User Query (from CLI or prompt)
 
 ```python
-user_query = "What is the status of vehicle 102?"
+user_query = "What is the status of vehicle 102?"  # example only; client now reads from command line or prompts the user
 
 response = client.models.generate_content(
     model="gemini-2.5-flash-lite",
@@ -213,9 +229,10 @@ response = client.models.generate_content(
 )
 
 # Gemini analyzes: "User wants vehicle 102 info → I should call get_vehicle_details"
+# (or "How many are shipped?" → call inventory_summary)
 ```
 
-**Step 5: Handle Tool Request from Gemini**
+**Step 5: Handle Tool Request from Gemini (possibly multiple)**
 
 ```python
 if response.candidates[0].content.parts[0].function_call:
@@ -257,7 +274,7 @@ final_response = client.models.generate_content(
     config=types.GenerateContentConfig(tools=gemini_tools)
 )
 
-# Gemini now has: "User asked → I called tool → Tool returned data"
+# Gemini now has: "User asked → I called tool(s) → Tool returned data"
 # Gemini generates final human-readable answer
 ```
 
@@ -285,18 +302,25 @@ def clean_schema(schema):
 # First, ensure data source is running in another terminal
 python data_source.py
 
-# Then in another terminal, run the client
+# Then in another terminal, run the client, supplying a query as arguments
+python mcp_client.py "How many cars are in port?"
+
+# or simply run without args and answer the prompt:
 python mcp_client.py
-# Output:
-# --- Gemini requested tool: get_vehicle_details with args {'vehicle_id': '102'} ---
-# Final AI Answer: Honda Fit is currently shipped heading to Kandy
+# Enter your query: Find all Toyotas headed to Colombo
+
+# You will see the available tools listed and then
+# one or more tool calls. Example:
+# --- Gemini requested tool: search_vehicles with args {'status': 'shipped'} ---
+# --- Gemini requested tool: inventory_summary with args {} ---
+# Final AI Answer: I found that there is 1 vehicle that has been shipped. Would you like to know its details?
 ```
 
 ---
 
 ## 🔄 Complete Message Flow
 
-### Example: User asks "What is the status of vehicle 102?"
+### Example: User asks "What is the status of vehicle 102?" (or "Find all Toyotas heading to Colombo")
 
 ```
 User
@@ -308,7 +332,7 @@ User
          ├─ Connects to Google Gemini API
          │
          ├─ Gets tool list from MCP Server
-         │  └─ [get_vehicle_details: str → str]
+         │  └─ [get_vehicle_details, search_vehicles, inventory_summary, change_status]
          │
          ├─ Sends to Gemini:
          │  "Here are available tools: [get_vehicle_details]
@@ -321,7 +345,9 @@ User
          │  "Execute get_vehicle_details({'vehicle_id': '102'})"
          │
          ├─ mcp_server.py receives call
-         │  └─ Makes HTTP GET http://127.0.0.1:8001/vehicles/102
+         │  ├─ May call HTTP GET http://127.0.0.1:8001/vehicles/102
+         │  ├─ Or GET http://127.0.0.1:8001/vehicles/search?status=Shipped
+         │  └─ Or PATCH to update status
          │
          ├─ data_source.py responds:
          │  {"make": "Honda", "model": "Fit", "status": "Shipped", "destination": "Kandy"}
@@ -336,6 +362,7 @@ User
          │
          ├─ Gemini generates final answer:
          │  "The Honda Fit (vehicle 102) is currently shipped and heading to Kandy."
+│  (or "One vehicle is shipped; details: Vehicle 102 …")
          │
          └──> Final Answer displayed to user
 ```
@@ -438,6 +465,8 @@ async def get_vehicle_location(vehicle_id: str) -> str:
 Edit `mcp_client.py`:
 
 ```python
+# The script now reads the query from command-line args or a prompt.
+# You can still modify this default placeholder if you like:
 user_query = "What is the location of vehicle 102?"  # Change this
 ```
 
@@ -448,6 +477,16 @@ Edit `mcp_client.py`:
 ```python
 model_id = "gemini-2.5-pro"  # or any other available model
 ```
+
+---
+
+### ✅ Next steps
+
+- Explore using **search_vehicles** for criteria-based lookups
+- Ask the agent to **summarize inventory**: "How many cars are in port?"
+- Use **change_status** to modify state programmatically
+
+The README now reflects the latest toolset and agent capabilities.
 
 ---
 
