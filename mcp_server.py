@@ -131,6 +131,34 @@ async def inventory_summary() -> str:
         return f"Error generating inventory summary: {e}"
 
 @mcp.tool()
+async def add_vehicle(make: str, model: str, status: str, destination: str) -> str:
+    """Create a new vehicle record in the data source.
+
+    Agents should call this when they know all required fields and want to
+    add inventory. The data source returns the new ID and details on success.
+    """
+    try:
+        payload = {
+            "make": make,
+            "model": model,
+            "status": status,
+            "destination": destination,
+        }
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(f"{DATA_SOURCE_URL}/vehicles", json=payload)
+            if response.status_code in (200, 201):
+                data = response.json()
+                return (
+                    f"Added vehicle {data['id']}: {data['make']} {data['model']} "
+                    f"status {data['status']} destination {data['destination']}.")
+            return f"Error: could not add vehicle ({response.status_code})."
+    except httpx.TimeoutException:
+        return "Error: timeout while adding vehicle."
+    except Exception as e:
+        return f"Error adding vehicle: {e}"
+
+
+@mcp.tool()
 async def change_status(vehicle_id: str, new_status: str) -> str:
     """Update the status of a vehicle identified by ID.
 

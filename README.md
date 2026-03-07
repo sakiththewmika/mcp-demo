@@ -103,6 +103,7 @@ python data_source.py
 # Endpoints available:
 #   GET /vehicles/{id}
 #   GET /vehicles/search?status=Shipped&make=Toyota
+#   POST /vehicles  (JSON body with make/model/status/destination)
 #   PATCH /vehicles/{id}?status=In+Port
 ```
 

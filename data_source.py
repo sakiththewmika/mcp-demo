@@ -48,27 +48,31 @@ async def get_vehicle(vehicle_id: str):
     if vehicle_id not in VEHICLES:
         raise HTTPException(status_code=404, detail="Vehicle not found")
     return VEHICLES[vehicle_id]
-    """Search vehicles by optional criteria.
 
-    Each query parameter is case-insensitive and will match if it appears anywhere
-    in the corresponding vehicle field. When multiple parameters are provided the
-    result is the intersection of all filters.
+@app.post("/vehicles")
+async def add_vehicle(vehicle: dict):
+    """Add a new vehicle to the mock database.
+
+    The request body must include `make`, `model`, `status`, and `destination`.
+    A new ID is generated automatically by incrementing the highest existing ID.
     """
-    def match(value: str, term: str) -> bool:
-        return term.lower() in value.lower()
+    required = {"make", "model", "status", "destination"}
+    if not required.issubset(vehicle.keys()):
+        raise HTTPException(status_code=400, detail=f"Missing fields: {required - set(vehicle.keys())}")
 
-    results = []
-    for vid, info in VEHICLES.items():
-        if make and not match(info.get("make", ""), make):
-            continue
-        if model and not match(info.get("model", ""), model):
-            continue
-        if status and not match(info.get("status", ""), status):
-            continue
-        if destination and not match(info.get("destination", ""), destination):
-            continue
-        results.append({"id": vid, **info})
-    return results
+    # generate the next numeric ID as a string
+    try:
+        next_id = str(int(max(VEHICLES.keys(), default="0")) + 1)
+    except ValueError:
+        next_id = "1"
+
+    VEHICLES[next_id] = {
+        "make": vehicle["make"],
+        "model": vehicle["model"],
+        "status": vehicle["status"],
+        "destination": vehicle["destination"],
+    }
+    return {"id": next_id, **VEHICLES[next_id]}
 
 @app.patch("/vehicles/{vehicle_id}")
 async def update_vehicle_status(vehicle_id: str, status: str):
